@@ -14,31 +14,104 @@ from crud.resolver import Resolver
 from crud import ast_nodes as ast
 
 
-def test_regresi_operator_tidak_sama_dengan_satu_token():
-    vals = [t.value for t in tokenize("a <> 1") if t.type != T.EOF]
-    assert vals == ["a", "<>", "1"]
+#TEST REGRESI BIASA
 
-
-def test_regresi_kutip_ganda_dalam_string_jadi_satu_token():
-    toks = tokenize("'O''Brien'")
-    assert toks[0].type == T.STRING and toks[0].value == "O'Brien"
-    assert toks[1].type == T.EOF
-
-
+# --- lexer ---
+def test_regresi_komentar_blok_berisi_bintang():
+    toks = tokenize("/* a * b */ SELECT")
+    assert toks[0].value == "SELECT"
+ 
+ 
+def test_regresi_komentar_blok_lintas_baris_menjaga_nomor_baris():
+    toks = tokenize("/* a\n b */ SELECT")
+    assert (toks[0].value, toks[0].line) == ("SELECT", 2)
+ 
+ 
+def test_regresi_komentar_blok_tidak_ditutup():
+    with pytest.raises(LexError):
+        tokenize("SELECT /* belum ditutup")
+ 
+ 
 def test_regresi_keyword_campuran_huruf_dinormalisasi():
     toks = tokenize("Select selection")
     assert (toks[0].type, toks[0].value) == (T.KEYWORD, "SELECT")
     assert toks[1].type == T.IDENT
-
-
-def test_regresi_komentar_blok_berisi_bintang():
-    toks = tokenize("/* a * b */ SELECT")
-    assert toks[0].value == "SELECT"
-
-
-def test_regresi_komentar_blok_tidak_ditutup():
-    with pytest.raises(LexError):
-        tokenize("SELECT /* belum ditutup")
+ 
+ 
+def test_regresi_operator_tidak_sama_dengan_satu_token():
+    vals = [t.value for t in tokenize("a <> 1") if t.type != T.EOF]
+    assert vals == ["a", "<>", "1"]
+ 
+ 
+def test_regresi_kutip_ganda_dalam_string_jadi_satu_token():
+    toks = tokenize("'O''Brien'")
+    assert toks[0].type == T.STRING and toks[0].value == "O'Brien"
+    assert toks[1].type == T.EOF
+ 
+ 
+# --- parser ---
+def test_regresi_and_lebih_kuat_dari_or():
+    where = parse_sql("SELECT a FROM t WHERE a = 1 OR b = 2 AND c = 3;").statements[0].where
+    assert where.op == "OR"
+    assert where.right.op == "AND"
+ 
+ 
+def test_regresi_recovery_berhenti_di_titik_koma():
+    script = parse_sql("SELECT id nama, FROM x;\nDELETE FROM y WHERE id = 1;")
+    assert len(script.errors) == 1
+    assert len(script.statements) == 1
+    assert type(script.statements[0]).__name__ == "Delete"
+ 
+ 
+def test_regresi_left_outer_join():
+    script = parse_sql("SELECT * FROM a LEFT OUTER JOIN b ON a.x = b.x;")
+    assert script.errors == []
+    assert script.statements[0].joins[0].kind == "LEFT"
+ 
+ 
+def test_regresi_insert_select():
+    script = parse_sql("INSERT INTO arsip (id) SELECT id FROM pesanan;")
+    assert script.errors == []
+    stmt = script.statements[0]
+    assert stmt.table.name == "arsip"
+    assert stmt.columns == ["id"]
+    assert stmt.values == []
+    assert type(stmt.query).__name__ == "Select"
+ 
+ 
+#TEST TEPI
+def test_tepi_script_tanpa_statement():
+    # Berisiko: loop parser bisa salah menangani script tanpa satu pun statement
+    # (kosong, hanya titik koma, atau hanya komentar).
+    for sumber in ["", ";;;", "-- hanya komentar", "/* hanya komentar */"]:
+        script = parse_sql(sumber)
+        assert script.statements == []
+        assert script.errors == []
+ 
+ 
+def test_tepi_and_milik_between_tidak_dianggap_operator_logika():
+    # Berisiko: AND punya dua arti; yang pertama milik BETWEEN, yang kedua operator logika.
+    where = parse_sql("SELECT a FROM t WHERE x BETWEEN 1 AND 2 AND y = 3;").statements[0].where
+    assert where.op == "AND"
+    assert type(where.left).__name__ == "Between"
+    assert where.right.op == "="
+ 
+ 
+def test_tepi_string_kosong_dan_string_berakhir_kutip_escape():
+    # Berisiko: aturan '' bertabrakan dengan string kosong dan dengan '' tepat sebelum
+    # kutip penutup. '' adalah string kosong, 'a''' adalah string bernilai a'.
+    kosong = tokenize("''")
+    assert (kosong[0].type, kosong[0].value) == (T.STRING, "")
+    berakhir_escape = tokenize("'a'''")
+    assert (berakhir_escape[0].type, berakhir_escape[0].value) == (T.STRING, "a'")
+ 
+ 
+def test_tepi_string_tidak_ditutup_melaporkan_posisi_pembuka():
+    # Berisiko: string yang membentang beberapa baris tanpa penutup; posisi error
+    # harus menunjuk kutip pembukanya (baris 1, kolom 8), bukan akhir input.
+    with pytest.raises(LexError) as info:
+        tokenize("SELECT 'belum\ntutup")
+    assert (info.value.line, info.value.col) == (1, 8)
         
         
 #analyzer.py
