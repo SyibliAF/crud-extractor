@@ -80,3 +80,25 @@ def test_kolom_tanpa_qualifier_tanpa_tabel():
     script, diags = resolve("INSERT INTO pelanggan VALUES (nama)")
     assert [c.resolved for c in columns(script)] == [None]
     assert [d.level for d in diags] == ["warning"]
+    
+def test_regresi_alias_subquery_menutupi_alias_luar():
+    # qualifier harus dicari dari scope terdalam ke luar
+    script, diags = resolve(
+        "SELECT p.a FROM pelanggan p "
+        "WHERE EXISTS (SELECT 1 FROM pesanan p WHERE p.id = 1)")
+    resolved = {c.name: c.resolved for c in columns(script)}
+    assert resolved["a"] == "pelanggan"
+    assert resolved["id"] == "pesanan"
+    assert diags == []
+
+
+def test_regresi_alias_delete_tidak_bocor_ke_statement_berikutnya():
+    # Tiap statement berdiri sendiri
+    script = parse_sql("DELETE FROM pesanan o WHERE id = 1; SELECT o.id FROM pelanggan")
+    assert script.errors == []
+    resolver = Resolver()
+    diags = resolver.resolve_script(script)
+    assert [d.level for d in diags] == ["error"]
+    assert "'o'" in diags[0].message
+    assert [c.resolved for c in columns(script.statements[1])] == [None]
+    assert resolver.scope is None
