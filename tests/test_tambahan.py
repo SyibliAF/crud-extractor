@@ -12,6 +12,7 @@ from crud.analyzer import analyze_statement
 from crud.parser import parse_sql
 from crud.resolver import Resolver
 from crud import ast_nodes as ast
+from crud.pipeline import analyze_source
 
 
 #TEST REGRESI BIASA
@@ -113,6 +114,7 @@ def test_tepi_string_tidak_ditutup_melaporkan_posisi_pembuka():
         tokenize("SELECT 'belum\ntutup")
     assert (info.value.line, info.value.col) == (1, 8)
         
+#===============================================================#
         
 #analyzer.py
 def crud(sql):
@@ -175,3 +177,42 @@ def test_regresi_alias_delete_tidak_bocor_ke_statement_berikutnya():
     assert "'o'" in diags[0].message
     assert [c.resolved for c in columns(script.statements[1])] == [None]
     assert resolver.scope is None
+    
+#test tepi 
+def test_tepi_insert_select_dari_tabel_yang_sama():
+    # Tabel yang sama jadi target (C) sekaligus sumber (R): hasil digabung dan urut C lalu R.
+    stmt = parse_sql("INSERT INTO t SELECT * FROM t").statements[0]
+    assert analyze_statement(stmt) == {"t": {"C", "R"}}
+    assert analyze_source("INSERT INTO t SELECT * FROM t").matrix() == {"t": "CR"}
+
+
+def test_tepi_subquery_di_from_dan_nama_bersekema_huruf_besar():
+    # Alias subquery bukan tabel; tabel di dalamnya R; nama ditulis kecil lengkap skema.
+    stmt = parse_sql("SELECT s.a FROM (SELECT a FROM CRM.Pelanggan) s").statements[0]
+    assert analyze_statement(stmt) == {"crm.pelanggan": {"R"}}
+
+
+def test_tepi_correlated_subquery_melihat_alias_luar():
+    # Subquery boleh merujuk alias di luar (SPESIFIKASI.md 4.3); alias luar harus ketemu.
+    script, diags = resolve(
+        "SELECT p.a FROM pelanggan p "
+        "WHERE EXISTS (SELECT 1 FROM pesanan o WHERE o.pelanggan_id = p.id)")
+    resolved = {(c.qualifier, c.name): c.resolved for c in columns(script)}
+    assert resolved[("p", "id")] == "pelanggan"
+    assert resolved[("o", "pelanggan_id")] == "pesanan"
+    assert diags == []
+
+
+def test_tepi_alias_ganda_di_scope_yang_sama_adalah_error():
+    # Nama yang dideklarasikan dua kali dalam satu scope harusnya error.
+    _, diags = resolve("SELECT 1 FROM pelanggan p, pesanan p")
+    assert [d.level for d in diags] == ["error"]
+    assert "'p'" in diags[0].message
+
+
+def test_tepi_subquery_di_from_tidak_melihat_tabel_saudaranya():
+    # Subquery pada 'FROM' diresolve sebelum scope 'SELECT' sehingga p.id harusnya tidak terbaca.
+    _, diags = resolve(
+        "SELECT 1 FROM pelanggan p, (SELECT 1 FROM pesanan o WHERE o.x = p.id) s")
+    assert [d.level for d in diags] == ["error"]
+    assert "'p'" in diags[0].message
